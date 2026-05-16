@@ -2,3 +2,5 @@ dist/
 node_modules/
 logs/
 .vercel
+doubao_storage_state.json
+docs/API.md

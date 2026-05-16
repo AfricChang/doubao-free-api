@@ -20,10 +20,11 @@ export default {
             const tokens = chat.tokenSplit(request.headers.authorization);
             // 随机挑选一个refresh_token
             const token = _.sample(tokens);
-            const {model, conversation_id: convId, messages, stream} = request.body;
+            const {model, conversation_id: convId, messages, stream, browser_state: browserState} = request.body;
+            const effectiveToken = token || "";
             const assistantId = /^[a-z0-9]{24,}$/.test(model) ? model : undefined
             if (stream) {
-                const s = await chat.createCompletionStream(messages, token, assistantId, convId);
+                const s = await chat.createCompletionStream(messages, effectiveToken, assistantId, convId, 0, browserState);
                 return new Response(s, {
                     type: "text/event-stream",
                     headers: {
@@ -33,7 +34,7 @@ export default {
                     }
                 });
             } else
-                return await chat.createCompletion(messages, token, assistantId, convId);
+                return await chat.createCompletion(messages, effectiveToken, assistantId, convId, 0, browserState);
         }
 
     }

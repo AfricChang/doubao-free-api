@@ -52,6 +52,63 @@ const FAKE_HEADERS = {
 const FILE_MAX_SIZE = 100 * 1024 * 1024;
 
 /**
+ * 从 API 请求传入的精简浏览器状态
+ * 只包含风控相关的必要字段
+ */
+interface BrowserState {
+    /** ttwid cookie - 浏览器指纹标识 */
+    ttwid?: string;
+    /** s_v_web_id cookie - 验证标识 */
+    s_v_web_id?: string;
+    /** odin_tt cookie - 设备追踪 */
+    odin_tt?: string;
+    /** d_ticket cookie - 设备票据 */
+    d_ticket?: string;
+    /** passport_csrf_token cookie */
+    passport_csrf_token?: string;
+    /** uid_tt cookie - 用户追踪 */
+    uid_tt?: string;
+    /** sid_guard cookie - 会话守卫 */
+    sid_guard?: string;
+    /** web_id - 从 localStorage AB 实验数据中提取的真实 tea_uuid */
+    web_id?: string;
+}
+
+/**
+ * 从 browser_state 构建完整 cookie 字符串和设备标识
+ */
+function buildBrowserContext(browserState: BrowserState, refreshToken: string): { cookieString: string; webId: string } {
+    const extraCookies: string[] = [];
+    if (browserState.ttwid) extraCookies.push(`ttwid=${browserState.ttwid}`);
+    if (browserState.s_v_web_id) extraCookies.push(`s_v_web_id=${browserState.s_v_web_id}`);
+    if (browserState.odin_tt) extraCookies.push(`odin_tt=${browserState.odin_tt}`);
+    if (browserState.d_ticket) extraCookies.push(`d_ticket=${browserState.d_ticket}`);
+    if (browserState.passport_csrf_token) {
+        extraCookies.push(`passport_csrf_token=${browserState.passport_csrf_token}`);
+        extraCookies.push(`passport_csrf_token_default=${browserState.passport_csrf_token}`);
+    }
+    if (browserState.uid_tt) {
+        extraCookies.push(`uid_tt=${browserState.uid_tt}`);
+        extraCookies.push(`uid_tt_ss=${browserState.uid_tt}`);
+    }
+    if (browserState.sid_guard) extraCookies.push(`sid_guard=${browserState.sid_guard}`);
+
+    // sessionid 始终从 refreshToken 取
+    const cookieParts = [
+        `sessionid=${refreshToken}`,
+        `sessionid_ss=${refreshToken}`,
+        `sid_tt=${refreshToken}`,
+        ...extraCookies,
+    ];
+
+    const webId = browserState.web_id || WEB_ID;
+    const cookieString = cookieParts.join("; ");
+
+    logger.info(`[BrowserState] 构建cookie: ${cookieParts.length}项, webId=${webId}`);
+    return { cookieString, webId };
+}
+
+/**
  * 获取缓存中的access_token
  *
  * 目前doubao的access_token是固定的，暂无刷新功能
@@ -86,7 +143,7 @@ function generateFakeABogus() {
 }
 
 /**
- * 生成cookie
+ * 生成cookie（降级模式，无 storage_state 时使用）
  */
 function generateCookie(refreshToken: string) {
     return [
@@ -100,11 +157,22 @@ function generateCookie(refreshToken: string) {
  *
  * @param method 请求方法
  * @param uri 请求路径
- * @param params 请求参数
- * @param headers 请求头
+ * @param refreshToken 用于认证的token
+ * @param options axios请求选项
+ * @param browserState 精简的浏览器状态（可选）
  */
-async function request(method: string, uri: string, refreshToken: string, options: AxiosRequestConfig = {}) {
+async function request(method: string, uri: string, refreshToken: string, options: AxiosRequestConfig = {}, browserState?: BrowserState | null) {
     const token = await acquireToken(refreshToken);
+
+    // 如果有浏览器状态，使用真实的 web_id 和完整 cookie
+    let effectiveWebId = WEB_ID;
+    let effectiveCookie = generateCookie(token);
+    if (browserState) {
+        const ctx = buildBrowserContext(browserState, token);
+        effectiveWebId = ctx.webId;
+        effectiveCookie = ctx.cookieString;
+    }
+
     const response = await axios.request({
         method,
         url: `https://www.doubao.com${uri}`,
@@ -119,16 +187,16 @@ async function request(method: string, uri: string, refreshToken: string, option
             region: "CN",
             samantha_web: 1,
             sys_region: "CN",
-            tea_uuid: WEB_ID,
+            tea_uuid: effectiveWebId,
             "use-olympus-account": 1,
             version_code: VERSION_CODE,
-            web_id: WEB_ID,
+            web_id: effectiveWebId,
             web_tab_id: util.uuid(),
             ...(options.params || {})
         },
         headers: {
             ...FAKE_HEADERS,
-            Cookie: generateCookie(token),
+            Cookie: effectiveCookie,
             "X-Flow-Trace": `04-${util.uuid()}-${util.uuid().substring(0, 16)}-01`,
             ...(options.headers || {}),
         },
@@ -148,10 +216,12 @@ async function request(method: string, uri: string, refreshToken: string, option
  * 在对话流传输完毕后移除会话，避免创建的会话出现在用户的对话列表中
  *
  * @param refreshToken 用于刷新access_token的refresh_token
+ * @param browserState 浏览器状态（可选）
  */
 async function removeConversation(
     convId: string,
-    refreshToken: string
+    refreshToken: string,
+    browserState?: BrowserState | null
 ) {
     try {
         const params = {
@@ -172,7 +242,7 @@ async function removeConversation(
             },
             params,
             headers
-        });
+        }, browserState);
         logger.success(`会话 ${convId} 删除成功`);
     } catch (err) {
         logger.error(`删除会话 ${convId} 失败:`, err);
@@ -188,13 +258,15 @@ async function removeConversation(
  * @param refreshToken 用于刷新access_token的refresh_token
  * @param assistantId 智能体ID，默认使用Doubao原版
  * @param retryCount 重试次数
+ * @param browserState 浏览器状态（可选）
  */
 async function createCompletion(
     messages: any[],
     refreshToken: string,
     assistantId = DEFAULT_ASSISTANT_ID,
     refConvId = "",
-    retryCount = 0
+    retryCount = 0,
+    browserState?: BrowserState | null
 ) {
     return (async () => {
         logger.info(`收到 ${messages.length} 条消息`);
@@ -238,7 +310,7 @@ async function createCompletion(
             },
             timeout: 300000,
             responseType: "stream"
-        });
+        }, browserState);
         if (response.headers["content-type"].indexOf("text/event-stream") == -1) {
             response.data.on("data", (buffer) => logger.error(buffer.toString()));
             throw new APIException(
@@ -253,7 +325,7 @@ async function createCompletion(
             `Stream has completed transfer ${util.timestamp() - streamStartTime}ms`
         );
 
-        removeConversation(answer.id, refreshToken).catch(
+        removeConversation(answer.id, refreshToken, browserState).catch(
             (err) => !refConvId && console.error('移除会话失败：', err)
         );
 
@@ -269,7 +341,8 @@ async function createCompletion(
                     refreshToken,
                     assistantId,
                     refConvId,
-                    retryCount + 1
+                    retryCount + 1,
+                    browserState
                 );
             })();
         }
@@ -284,13 +357,15 @@ async function createCompletion(
  * @param refreshToken 用于刷新access_token的refresh_token
  * @param assistantId 智能体ID，默认使用Doubao原版
  * @param retryCount 重试次数
+ * @param browserState 浏览器状态（可选）
  */
 async function createCompletionStream(
     messages: any[],
     refreshToken: string,
     assistantId = DEFAULT_ASSISTANT_ID,
     refConvId = "",
-    retryCount = 0
+    retryCount = 0,
+    browserState?: BrowserState | null
 ) {
     return (async () => {
         logger.info(`收到 ${messages.length} 条消息（流式）`);
@@ -334,7 +409,7 @@ async function createCompletionStream(
             },
             timeout: 300000,
             responseType: "stream"
-        });
+        }, browserState);
 
         if (response.headers["content-type"].indexOf("text/event-stream") == -1) {
             logger.error(
@@ -370,7 +445,7 @@ async function createCompletionStream(
             logger.success(
                 `Stream has completed transfer ${util.timestamp() - streamStartTime}ms`
             );
-            removeConversation(convId, refreshToken).catch(
+            removeConversation(convId, refreshToken, browserState).catch(
                 (err) => !refConvId && console.error(err)
             );
         });
@@ -385,7 +460,8 @@ async function createCompletionStream(
                     refreshToken,
                     assistantId,
                     refConvId,
-                    retryCount + 1
+                    retryCount + 1,
+                    browserState
                 );
             })();
         }
