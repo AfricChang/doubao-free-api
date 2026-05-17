@@ -4,3 +4,4 @@ logs/
 .vercel
 doubao_storage_state.json
 docs/API.md
+/deploy
