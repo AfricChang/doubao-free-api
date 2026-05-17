@@ -274,7 +274,7 @@ async function createCompletion(
         const refFileUrls = extractRefFileUrls(messages);
         const refs = refFileUrls.length
             ? await Promise.all(
-                refFileUrls.map((fileUrl) => uploadFile(fileUrl, refreshToken))
+                refFileUrls.map((fileUrl) => uploadFile(fileUrl, refreshToken, false, browserState))
             )
             : [];
 
@@ -373,7 +373,7 @@ async function createCompletionStream(
         const refFileUrls = extractRefFileUrls(messages);
         const refs = refFileUrls.length
             ? await Promise.all(
-                refFileUrls.map((fileUrl) => uploadFile(fileUrl, refreshToken))
+                refFileUrls.map((fileUrl) => uploadFile(fileUrl, refreshToken, false, browserState))
             )
             : [];
 
@@ -859,11 +859,11 @@ function buildAuthorization(
     return {authorization, amzDate, payloadHash};
 }
 
-async function acquireUploadAuth(refreshToken: string, resourceType: number) {
+async function acquireUploadAuth(refreshToken: string, resourceType: number, browserState?: BrowserState | null) {
     const data: any = await request("post", "/alice/resource/prepare_upload", refreshToken, {
         data: {tenant_id: "5", scene_id: "5", resource_type: resourceType},
         headers: {"agw-js-conv": "str"},
-    });
+    }, browserState);
     logger.info(`[UploadAuth] serviceId=${data?.service_id}, upload_host=${data?.upload_host}`);
     if (!data || !data.upload_auth_token)
         throw new APIException(EX.API_REQUEST_FAILED, "prepare_upload missing credentials");
@@ -1108,7 +1108,8 @@ async function commitImageUpload(
 async function uploadFile(
     fileUrl: string,
     refreshToken: string,
-    isVideoImage: boolean = false
+    isVideoImage: boolean = false,
+    browserState?: BrowserState | null
 ) {
     await checkFileUrl(fileUrl);
 
@@ -1136,7 +1137,7 @@ async function uploadFile(
     const ext = (extFromMime || path.extname(filename).replace(/^\./, "") || (mime.getExtension(mimeType) || "bin")).toLowerCase();
 
     try {
-        const auth = await acquireUploadAuth(refreshToken, isImage ? 2 : 1);
+        const auth = await acquireUploadAuth(refreshToken, isImage ? 2 : 1, browserState);
         logger.info(`STS acquired for ${isImage ? "image" : "file"}`);
 
         const apply = await applyImageUpload(
